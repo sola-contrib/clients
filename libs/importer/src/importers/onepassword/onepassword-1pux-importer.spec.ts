@@ -2,6 +2,7 @@ import { Utils } from "@bitwarden/common/platform/misc/utils";
 import { OrganizationId } from "@bitwarden/common/types/guid";
 import { FieldType, SecureNoteType, CipherType } from "@bitwarden/common/vault/enums";
 import { FieldView } from "@bitwarden/common/vault/models/view/field.view";
+import * as sdkInternal from "@bitwarden/sdk-internal";
 
 import { APICredentialsData } from "../spec-data/onepassword-1pux/api-credentials";
 import { BankAccountData } from "../spec-data/onepassword-1pux/bank-account";
@@ -30,6 +31,8 @@ import { SSNData } from "../spec-data/onepassword-1pux/ssn";
 import { WirelessRouterData } from "../spec-data/onepassword-1pux/wireless-router";
 
 import { OnePassword1PuxImporter } from "./onepassword-1pux-importer";
+
+jest.mock("@bitwarden/sdk-internal");
 
 function validateCustomField(fields: FieldView[], fieldName: string, expectedValue: any) {
   expect(fields).toBeDefined();
@@ -671,6 +674,16 @@ describe("1Password 1Pux Importer", () => {
   });
 
   it("should parse category 114 - SSH Key", async () => {
+    // Mock the SDK import_ssh_key function to return converted OpenSSH format
+    const mockConvertedKey = {
+      privateKey:
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACCWsp3FFVVCMGZ23hscRkDPfGzKZ8z1V/ZB9nzbdDFRswAAAJh8F3bYfBd2\n2AAAAAtzc2gtZWQyNTUxOQAAACCWsp3FFVVCMGZ23hscRkDPfGzKZ8z1V/ZB9nzbdDFRsw\nAAAEA59QYE22f+VFHhiyH1Vfqiwz7xLEt1zCuk8M8Ng5LpKpayncUVVUKwZ3beGxxGQM98\nbMpnzPVX9kH2fNt0MVGzAAAAE3Rlc3RAZXhhbXBsZS5jb20BAgMEBQ==\n-----END OPENSSH PRIVATE KEY-----\n",
+      publicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJayncUVVUKwZ3beGxxGQM98bMpnzPVX9kH2fNt0MVGz",
+      fingerprint: "SHA256:/9qSxXuic8kaVBhwv3c8PuetiEpaOgIp7xHNCbcSuN8",
+    } as sdkInternal.SshKeyView;
+
+    jest.spyOn(sdkInternal, "import_ssh_key").mockReturnValue(mockConvertedKey);
+
     const importer = new OnePassword1PuxImporter();
     const jsonString = JSON.stringify(SSH_KeyData);
     const result = await importer.parse(jsonString);
@@ -679,15 +692,31 @@ describe("1Password 1Pux Importer", () => {
     expect(cipher.type).toEqual(CipherType.SshKey);
     expect(cipher.name).toEqual("Some SSH Key");
     expect(cipher.notes).toEqual("SSH Key Note");
-    expect(cipher.sshKey.privateKey).toEqual(
+
+    // Verify that import_ssh_key was called with the PKCS#8 key from 1Password
+    expect(sdkInternal.import_ssh_key).toHaveBeenCalledWith(
       "-----BEGIN PRIVATE KEY-----\nMFECAQEwBQYDK2VwBCIEIDn1BgTbZ/5UUeGLIfVV+qLBOvEsS3XMK6Twzw2Dkukq\ngSEAlrKdxRVVQrBndt4bHEZAz3xsymfM9Vf2QfZ823QxUbM=\n-----END PRIVATE KEY-----\n",
     );
-    expect(cipher.sshKey.publicKey).toEqual(
-      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJayncUVVUKwZ3beGxxGQM98bMpnzPVX9kH2fNt0MVGz",
-    );
-    expect(cipher.sshKey.keyFingerprint).toEqual(
-      "SHA256:/9qSxXuic8kaVBhwv3c8PuetiEpaOgIp7xHNCbcSuN8",
-    );
+
+    // Verify the key was converted to OpenSSH format
+    expect(cipher.sshKey.privateKey).toEqual(mockConvertedKey.privateKey);
+    expect(cipher.sshKey.publicKey).toEqual(mockConvertedKey.publicKey);
+    expect(cipher.sshKey.keyFingerprint).toEqual(mockConvertedKey.fingerprint);
+  });
+
+  it("should skip SSH key when conversion fails", async () => {
+    // Mock the SDK to throw an unsupported error
+    jest.spyOn(sdkInternal, "import_ssh_key").mockImplementation(() => {
+      throw { variant: "UnsupportedKeyType" };
+    });
+
+    const importer = new OnePassword1PuxImporter();
+    const jsonString = JSON.stringify(SSH_KeyData);
+    const result = await importer.parse(jsonString);
+
+    // The SSH key entry should be skipped/omitted when conversion fails
+    expect(result.ciphers.length).toBe(0);
+    expect(result.success).toBe(true);
   });
 
   it("should create folders", async () => {
